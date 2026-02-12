@@ -2,10 +2,12 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
+
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+
 import {
   Select,
   SelectContent,
@@ -13,6 +15,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
 import {
   Table,
   TableBody,
@@ -21,13 +24,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+
 import { Separator } from "@/components/ui/separator";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
+
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+
 import {
   Trash2,
   Plus,
@@ -37,6 +38,7 @@ import {
   RefreshCcw,
   LogOut,
 } from "lucide-react";
+
 import {
   PieChart,
   Pie,
@@ -48,34 +50,22 @@ import {
   YAxis,
   CartesianGrid,
   Cell,
-  Legend,
 } from "recharts";
 
 /**
- * Weekly Training Dashboard (Strava + Manual)
+ * Weekly Training Dashboard (Strava + Manual) - CLEAN REBUILD
  *
- * ✅ Keeps the redesigned dashboard:
- *   - Time in all 5 HR zones (Z1–Z5). Any unzoned time counts as Zone 1.
- *   - Aerobic = Z1 + Z2
- *   - Anaerobic = Z4 + Z5 (anything above Zone 3)
- *   - Activity totals: Run, Lift, Swim, Bike, Cardio (everything else)
- *   - Zone colors: Z1 light blue, Z2 green, Z3 yellow, Z4 orange, Z5 red
- *   - Time formatting: <60m => Xm ; >=60m => Xh Ym
- *
- * ✅ Restores Strava connect + sync:
- *   - Connect Strava (OAuth via your backend)
- *   - Sync selected week (activities + optional HR streams)
- *
- * Backend endpoints expected:
- *   - GET  /api/strava/auth-url
- *   - GET  /api/strava/callback
- *   - POST /api/strava/logout
- *   - GET  /api/strava/me
- *   - GET  /api/strava/activities?after=<unix>&before=<unix>
- *   - GET  /api/strava/streams?activityId=<id>
+ * Features:
+ * - Z1–Z5 totals where Unzoned time counts as Z1
+ * - Aerobic = Z1 + Z2
+ * - Anaerobic = Z4 + Z5
+ * - Activity totals: Run, Lift, Swim, Bike, Cardio (everything else)
+ * - Zone colors + activity colors
+ * - Pie labels show % inside slices + legend list with time + %
+ * - Strava connect + sync week (expects /api/strava/* endpoints already in your app)
  */
 
-const STORAGE_KEY = "weekly-training-dashboard:v4";
+const STORAGE_KEY = "weekly-training-dashboard:v5-clean";
 
 const ACTIVITY_TYPES = ["Run", "Lift", "Swim", "Bike", "Cardio"] as const;
 type ActivityType = (typeof ACTIVITY_TYPES)[number];
@@ -85,12 +75,15 @@ type Session = {
   date: string; // YYYY-MM-DD
   type: ActivityType;
   durationMin: number;
+
   z1Min: number;
   z2Min: number;
   z3Min: number;
   z4Min: number;
   z5Min: number;
+
   notes?: string;
+
   source?: "manual" | "strava";
   externalId?: string; // strava activity id
 };
@@ -135,13 +128,14 @@ const ZONE_COLORS: Record<"Z1" | "Z2" | "Z3" | "Z4" | "Z5", string> = {
 };
 
 const ACTIVITY_COLORS: Record<ActivityType, string> = {
-  Run: "#3B82F6", // blue
-  Lift: "#A855F7", // purple
-  Swim: "#06B6D4", // cyan
-  Bike: "#F97316", // orange
-  Cardio: "#64748B", // slate
+  Run: "#3B82F6",
+  Lift: "#A855F7",
+  Swim: "#06B6D4",
+  Bike: "#F97316",
+  Cardio: "#64748B",
 };
 
+// ---------- helpers ----------
 function uid() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
@@ -155,10 +149,15 @@ function parseNum(v: string) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function pct(part: number, total: number) {
+  if (!Number.isFinite(part) || !Number.isFinite(total) || total <= 0) return 0;
+  return (part / total) * 100;
+}
+
 function startOfWeekISO(d = new Date()) {
   const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const day = date.getUTCDay();
-  const diff = day === 0 ? -6 : 1 - day;
+  const day = date.getUTCDay(); // 0=Sun
+  const diff = day === 0 ? -6 : 1 - day; // Monday start
   date.setUTCDate(date.getUTCDate() + diff);
   return date.toISOString().slice(0, 10);
 }
@@ -193,7 +192,7 @@ function formatDuration(minTotal: number) {
 function normalizeTypeToActivityType(input: any): ActivityType {
   const t = String(input || "").toLowerCase();
   if (t === "run") return "Run";
-  if (t === "lift" || t === "strength" || t === "weight" || t === "weights") return "Lift";
+  if (t === "lift" || t === "strength" || t === "weights" || t === "weight") return "Lift";
   if (t === "swim") return "Swim";
   if (t === "bike" || t === "ride" || t === "cycling") return "Bike";
   return "Cardio";
@@ -295,18 +294,12 @@ function downloadJson(filename: string, data: any) {
 function getZonedMinutes(s: Session) {
   return s.z1Min + s.z2Min + s.z3Min + s.z4Min + s.z5Min;
 }
-
 function getUnzonedMinutes(s: Session) {
   return Math.max(0, s.durationMin - getZonedMinutes(s));
 }
 
 function weekZoneTotalsAdjustedToZ1(sessions: Session[]) {
-  let z1 = 0,
-    z2 = 0,
-    z3 = 0,
-    z4 = 0,
-    z5 = 0;
-
+  let z1 = 0, z2 = 0, z3 = 0, z4 = 0, z5 = 0;
   for (const s of sessions) {
     z1 += s.z1Min + getUnzonedMinutes(s);
     z2 += s.z2Min;
@@ -314,7 +307,6 @@ function weekZoneTotalsAdjustedToZ1(sessions: Session[]) {
     z4 += s.z4Min;
     z5 += s.z5Min;
   }
-
   return { z1, z2, z3, z4, z5 };
 }
 
@@ -341,19 +333,17 @@ function warnZones(s: Session) {
 function computeZoneMinutesFromStreams(streams: StravaStreamsResponse, zones: HrZones) {
   const hr = streams.heartrate?.data;
   const time = streams.time?.data;
+
   if (!hr || !time || hr.length < 2 || time.length < 2 || hr.length !== time.length) {
     return { z1Min: 0, z2Min: 0, z3Min: 0, z4Min: 0, z5Min: 0, hasStreams: false };
   }
 
-  let z1 = 0,
-    z2 = 0,
-    z3 = 0,
-    z4 = 0,
-    z5 = 0;
+  let z1 = 0, z2 = 0, z3 = 0, z4 = 0, z5 = 0;
 
   for (let i = 1; i < hr.length; i++) {
-    const dt = Math.max(0, (time[i] ?? 0) - (time[i - 1] ?? 0));
+    const dt = Math.max(0, (time[i] ?? 0) - (time[i - 1] ?? 0)); // seconds
     const bpm = hr[i] ?? 0;
+
     if (bpm >= zones.z5Low) z5 += dt;
     else if (bpm >= zones.z4Low) z4 += dt;
     else if (bpm >= zones.z3Low) z3 += dt;
@@ -371,11 +361,6 @@ function computeZoneMinutesFromStreams(streams: StravaStreamsResponse, zones: Hr
   };
 }
 
-function pct(part: number, total: number) {
-  if (!Number.isFinite(part) || !Number.isFinite(total) || total <= 0) return 0;
-  return (part / total) * 100;
-}
-
 function renderPercentLabel({
   cx,
   cy,
@@ -384,8 +369,7 @@ function renderPercentLabel({
   outerRadius,
   percent,
 }: any) {
-  // Don’t label tiny slices.
-  if (!percent || percent < 0.04) return null;
+  if (!percent || percent < 0.04) return null; // hide tiny slices
 
   const RADIAN = Math.PI / 180;
   const r = innerRadius + (outerRadius - innerRadius) * 0.6;
@@ -393,7 +377,14 @@ function renderPercentLabel({
   const y = cy + r * Math.sin(-midAngle * RADIAN);
 
   return (
-    <text x={x} y={y} fill="currentColor" textAnchor="middle" dominantBaseline="central" className="text-[11px] font-medium">
+    <text
+      x={x}
+      y={y}
+      fill="currentColor"
+      textAnchor="middle"
+      dominantBaseline="central"
+      className="text-[11px] font-medium"
+    >
       {(percent * 100).toFixed(0)}%
     </text>
   );
@@ -406,69 +397,20 @@ function LegendList({
 }) {
   return (
     <div className="mt-2 flex flex-col gap-1 text-xs text-muted-foreground">
-      {items.map((it) => {
-        const p = pct(it.valueMin, it.totalMin).toFixed(0);
-        return (
-          <div key={it.name} className="flex items-center gap-2">
-            <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: it.color }} />
-            <span className="truncate">
-              <span className="font-medium text-foreground">{it.name}</span>
-              <span className="text-muted-foreground"> · {formatDuration(it.valueMin)} · {p}%</span>
+      {items.map((it) => (
+        <div key={it.name} className="flex items-center gap-2">
+          <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: it.color }} />
+          <span className="truncate">
+            <span className="font-medium text-foreground">{it.name}</span>
+            <span className="text-muted-foreground">
+              {" "}
+              · {formatDuration(it.valueMin)} · {pct(it.valueMin, it.totalMin).toFixed(0)}%
             </span>
-          </div>
-        );
-      })}
+          </span>
+        </div>
+      ))}
     </div>
   );
-}
-
-function renderPercentLabel({
-  cx,
-  cy,
-  midAngle,
-  innerRadius,
-  outerRadius,
-  percent,
-}: any) {
-  // Don’t label tiny slices.
-  if (!percent || percent < 0.04) return null;
-
-  const RADIAN = Math.PI / 180;
-  const r = innerRadius + (outerRadius - innerRadius) * 0.6;
-  const x = cx + r * Math.cos(-midAngle * RADIAN);
-  const y = cy + r * Math.sin(-midAngle * RADIAN);
-
-  return (
-    <text x={x} y={y} fill="currentColor" textAnchor="middle" dominantBaseline="central" className="text-[11px] font-medium">
-      {(percent * 100).toFixed(0)}%
-    </text>
-  );
-}
-
-  let z1 = 0,
-    z2 = 0,
-    z3 = 0,
-    z4 = 0,
-    z5 = 0;
-
-  for (let i = 1; i < hr.length; i++) {
-    const dt = Math.max(0, (time[i] ?? 0) - (time[i - 1] ?? 0));
-    const bpm = hr[i] ?? 0;
-    if (bpm >= zones.z5Low) z5 += dt;
-    else if (bpm >= zones.z4Low) z4 += dt;
-    else if (bpm >= zones.z3Low) z3 += dt;
-    else if (bpm >= zones.z2Low) z2 += dt;
-    else z1 += dt;
-  }
-
-  return {
-    z1Min: Math.round(z1 / 60),
-    z2Min: Math.round(z2 / 60),
-    z3Min: Math.round(z3 / 60),
-    z4Min: Math.round(z4 / 60),
-    z5Min: Math.round(z5 / 60),
-    hasStreams: true,
-  };
 }
 
 async function apiGet<T>(url: string): Promise<T> {
@@ -488,6 +430,7 @@ async function apiPost<T>(url: string, body?: any): Promise<T> {
   return res.json();
 }
 
+// ---------- component ----------
 export default function WeeklyTrainingDashboardApp() {
   const loaded = useMemo(() => safeLoad(), []);
 
@@ -506,7 +449,6 @@ export default function WeeklyTrainingDashboardApp() {
     safeSave({ weekStartISO, sessions, hrZones, strava });
   }, [weekStartISO, sessions, hrZones, strava]);
 
-  // If backend redirects back with these query params
   useEffect(() => {
     const url = new URL(window.location.href);
     const connected = url.searchParams.get("strava_connected");
@@ -521,7 +463,10 @@ export default function WeeklyTrainingDashboardApp() {
   }, []);
 
   const weekSessions = useMemo(
-    () => sessions.filter((s) => withinWeek(s.date, weekStartISO)).sort((a, b) => (a.date < b.date ? -1 : 1)),
+    () =>
+      sessions
+        .filter((s) => withinWeek(s.date, weekStartISO))
+        .sort((a, b) => (a.date < b.date ? -1 : 1)),
     [sessions, weekStartISO]
   );
 
@@ -542,17 +487,7 @@ export default function WeeklyTrainingDashboardApp() {
 
     const activityMin = activityTotals(weekSessions);
 
-    return {
-      totalMin,
-      z1Min,
-      z2Min,
-      z3Min,
-      z4Min,
-      z5Min,
-      aerobicMin,
-      anaerobicMin,
-      activityMin,
-    };
+    return { totalMin, z1Min, z2Min, z3Min, z4Min, z5Min, aerobicMin, anaerobicMin, activityMin };
   }, [weekSessions]);
 
   const zoneChartData = useMemo(
@@ -567,7 +502,10 @@ export default function WeeklyTrainingDashboardApp() {
     [totals]
   );
 
-  const zoneTotalForPct = useMemo(() => zoneChartData.reduce((a, b) => a + b.value, 0), [zoneChartData]);
+  const zoneTotalForPct = useMemo(
+    () => zoneChartData.reduce((a, b) => a + b.value, 0),
+    [zoneChartData]
+  );
 
   const activityChartData = useMemo(
     () =>
@@ -577,7 +515,10 @@ export default function WeeklyTrainingDashboardApp() {
     [totals]
   );
 
-  const activityTotalForPct = useMemo(() => activityChartData.reduce((a, b) => a + b.value, 0), [activityChartData]);
+  const activityTotalForPct = useMemo(
+    () => activityChartData.reduce((a, b) => a + b.value, 0),
+    [activityChartData]
+  );
 
   const byDay = useMemo(() => {
     const labels = Array.from({ length: 7 }, (_, i) => addDaysISO(weekStartISO, i));
@@ -585,10 +526,7 @@ export default function WeeklyTrainingDashboardApp() {
     for (const s of weekSessions) {
       map.set(s.date, (map.get(s.date) ?? 0) + s.durationMin);
     }
-    return labels.map((date) => ({
-      date: date.slice(5),
-      minutes: map.get(date) ?? 0,
-    }));
+    return labels.map((date) => ({ date: date.slice(5), minutes: map.get(date) ?? 0 }));
   }, [weekSessions, weekStartISO]);
 
   const [form, setForm] = useState<Partial<Session>>(() => ({
@@ -642,8 +580,10 @@ export default function WeeklyTrainingDashboardApp() {
         const parsed = JSON.parse(String(reader.result ?? ""));
         const nextWeek = typeof parsed.weekStartISO === "string" ? parsed.weekStartISO : weekStartISO;
         const nextSessions = Array.isArray(parsed.sessions) ? parsed.sessions.map(normalizeSession) : sessions;
+
         setWeekStartISO(nextWeek);
         setSessions(nextSessions);
+
         if (parsed.hrZones) {
           setHrZones({
             z2Low: Number(parsed.hrZones.z2Low ?? hrZones.z2Low),
@@ -652,8 +592,12 @@ export default function WeeklyTrainingDashboardApp() {
             z5Low: Number(parsed.hrZones.z5Low ?? hrZones.z5Low),
           });
         }
+
         if (parsed.strava) {
-          setStrava({ connected: Boolean(parsed.strava.connected), athleteName: parsed.strava.athleteName });
+          setStrava({
+            connected: Boolean(parsed.strava.connected),
+            athleteName: parsed.strava.athleteName,
+          });
         }
       } catch {
         // ignore
@@ -695,7 +639,9 @@ export default function WeeklyTrainingDashboardApp() {
       const after = isoToUnixSeconds(weekStartISO + "T00:00:00Z");
       const before = isoToUnixSeconds(addDaysISO(weekStartISO, 7) + "T00:00:00Z");
 
-      const activities = await apiGet<StravaActivity[]>(`/api/strava/activities?after=${after}&before=${before}`);
+      const activities = await apiGet<StravaActivity[]>(
+        `/api/strava/activities?after=${after}&before=${before}`
+      );
 
       const baseSessions: Session[] = activities.map((a) => {
         const dateISO = new Date(a.start_date).toISOString().slice(0, 10);
@@ -711,17 +657,24 @@ export default function WeeklyTrainingDashboardApp() {
         });
       });
 
+      // Limit HR stream fetches (Strava rate limits)
       const withHr = activities.filter(
         (a) => typeof a.average_heartrate === "number" || typeof a.max_heartrate === "number"
       );
+
       const streamFetchCount = Math.min(withHr.length, 25);
-      const zoneByActivityId = new Map<number, { z1Min: number; z2Min: number; z3Min: number; z4Min: number; z5Min: number }>();
+      const zoneByActivityId = new Map<
+        number,
+        { z1Min: number; z2Min: number; z3Min: number; z4Min: number; z5Min: number }
+      >();
 
       for (let i = 0; i < streamFetchCount; i++) {
         const a = withHr[i];
         setSyncStatus(`Syncing zones (${i + 1}/${streamFetchCount})…`);
         try {
-          const streams = await apiGet<StravaStreamsResponse>(`/api/strava/streams?activityId=${a.id}`);
+          const streams = await apiGet<StravaStreamsResponse>(
+            `/api/strava/streams?activityId=${a.id}`
+          );
           const z = computeZoneMinutesFromStreams(streams, hrZones);
           if (z.hasStreams) {
             zoneByActivityId.set(a.id, {
@@ -745,7 +698,7 @@ export default function WeeklyTrainingDashboardApp() {
       });
 
       setSessions((prev) => {
-        // Keep ALL manual sessions. Replace Strava sessions ONLY for the selected week.
+        // Keep manual sessions always. Replace Strava sessions ONLY for the selected week.
         const keepManual = prev.filter((p) => p.source !== "strava" || !withinWeek(p.date, weekStartISO));
         return [...mergedSessions, ...keepManual];
       });
@@ -776,7 +729,9 @@ export default function WeeklyTrainingDashboardApp() {
         >
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight">Weekly Training Dashboard</h1>
+              <h1 className="text-2xl font-semibold tracking-tight">
+                Weekly Training Dashboard
+              </h1>
               <p className="text-sm text-muted-foreground">
                 HR zones (Z1–Z5), Aerobic vs Anaerobic, and total time by activity. Unzoned counts as Z1.
               </p>
@@ -826,14 +781,16 @@ export default function WeeklyTrainingDashboardApp() {
 
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-xs text-muted-foreground">
-              Week: <span className="font-medium">{weekStartISO}</span> → <span className="font-medium">{weekEndISO}</span>
+              Week: <span className="font-medium">{weekStartISO}</span> →{" "}
+              <span className="font-medium">{weekEndISO}</span>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
               {strava.connected ? (
                 <>
                   <div className="text-xs text-muted-foreground">
-                    Connected: <span className="font-medium">{strava.athleteName || "Strava"}</span>
+                    Connected:{" "}
+                    <span className="font-medium">{strava.athleteName || "Strava"}</span>
                   </div>
                   <Button variant="secondary" onClick={syncFromStravaForWeek}>
                     <RefreshCcw className="mr-2 h-4 w-4" /> Sync week
@@ -865,8 +822,8 @@ export default function WeeklyTrainingDashboardApp() {
             <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
 
+          {/* DASHBOARD */}
           <TabsContent value="dashboard">
-            {/* Summary */}
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
               <Card className="rounded-2xl shadow-sm">
                 <CardHeader className="pb-2">
@@ -974,11 +931,10 @@ export default function WeeklyTrainingDashboardApp() {
                                 return [`${formatDuration(val)} (${perc}%)`, p?.name];
                               }}
                             />
-                            {/* keep Legend component mounted for layout consistency */}
-                            <Legend content={() => null} />
                           </PieChart>
                         </ResponsiveContainer>
                       </div>
+
                       <LegendList
                         items={zoneChartData.map((d) => ({
                           name: d.name,
@@ -988,7 +944,6 @@ export default function WeeklyTrainingDashboardApp() {
                         }))}
                       />
                     </>
-                  )}
                   )}
                 </CardContent>
               </Card>
@@ -1046,10 +1001,10 @@ export default function WeeklyTrainingDashboardApp() {
                                 return [`${formatDuration(val)} (${perc}%)`, p?.name];
                               }}
                             />
-                            <Legend content={() => null} />
                           </PieChart>
                         </ResponsiveContainer>
                       </div>
+
                       <LegendList
                         items={activityChartData.map((d) => ({
                           name: d.name,
@@ -1060,7 +1015,6 @@ export default function WeeklyTrainingDashboardApp() {
                       />
                     </>
                   )}
-                  )}
                 </CardContent>
               </Card>
 
@@ -1070,7 +1024,9 @@ export default function WeeklyTrainingDashboardApp() {
                 </CardHeader>
                 <CardContent>
                   {weekSessions.length === 0 ? (
-                    <div className="py-10 text-center text-sm text-muted-foreground">No sessions yet. Add one or sync Strava.</div>
+                    <div className="py-10 text-center text-sm text-muted-foreground">
+                      No sessions yet. Add one or sync Strava.
+                    </div>
                   ) : (
                     <Table>
                       <TableHeader>
@@ -1087,36 +1043,51 @@ export default function WeeklyTrainingDashboardApp() {
                           <TableHead className="w-[90px]"></TableHead>
                         </TableRow>
                       </TableHeader>
+
                       <TableBody>
                         {weekSessions.map((s) => {
                           const warning = warnZones(s);
                           const z1Adj = s.z1Min + getUnzonedMinutes(s);
+
                           return (
                             <TableRow key={s.id} className={warning ? "bg-muted/30" : ""}>
                               <TableCell className="font-medium">{s.date}</TableCell>
+
                               <TableCell>
                                 <div className="flex items-center gap-2">
                                   <span>{s.type}</span>
                                   {s.source === "strava" && (
-                                    <span className="rounded-full border px-2 py-0.5 text-[10px] text-muted-foreground">Strava</span>
+                                    <span className="rounded-full border px-2 py-0.5 text-[10px] text-muted-foreground">
+                                      Strava
+                                    </span>
                                   )}
                                 </div>
                               </TableCell>
+
                               <TableCell className="text-right">{formatDuration(s.durationMin)}</TableCell>
                               <TableCell className="text-right">{formatDuration(z1Adj)}</TableCell>
                               <TableCell className="text-right">{formatDuration(s.z2Min)}</TableCell>
                               <TableCell className="text-right">{formatDuration(s.z3Min)}</TableCell>
                               <TableCell className="text-right">{formatDuration(s.z4Min)}</TableCell>
                               <TableCell className="text-right">{formatDuration(s.z5Min)}</TableCell>
+
                               <TableCell>
                                 <div className="flex flex-col">
                                   <span className="text-sm">{s.notes || "—"}</span>
-                                  {warning && <span className="text-xs text-muted-foreground">⚠ {warning}</span>}
+                                  {warning && (
+                                    <span className="text-xs text-muted-foreground">⚠ {warning}</span>
+                                  )}
                                 </div>
                               </TableCell>
+
                               <TableCell className="text-right">
                                 {s.source === "manual" ? (
-                                  <Button variant="ghost" size="icon" onClick={() => removeSession(s.id)} aria-label="Delete">
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => removeSession(s.id)}
+                                    aria-label="Delete"
+                                  >
                                     <Trash2 className="h-4 w-4" />
                                   </Button>
                                 ) : (
@@ -1134,12 +1105,14 @@ export default function WeeklyTrainingDashboardApp() {
             </div>
           </TabsContent>
 
+          {/* ADD SESSION */}
           <TabsContent value="add">
             <div className="mt-4 grid grid-cols-1 gap-4">
               <Card className="rounded-2xl shadow-sm">
                 <CardHeader>
                   <CardTitle className="text-base">Add a training session (manual)</CardTitle>
                 </CardHeader>
+
                 <CardContent>
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                     <div className="grid gap-1">
@@ -1217,7 +1190,8 @@ export default function WeeklyTrainingDashboardApp() {
 
                   <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                     <div className="text-xs text-muted-foreground">
-                      Any time not assigned to zones will automatically count as <span className="font-medium">Zone 1</span>.
+                      Any time not assigned to zones will automatically count as{" "}
+                      <span className="font-medium">Zone 1</span>.
                     </div>
                     <Button onClick={addSession}>
                       <Plus className="mr-2 h-4 w-4" /> Add session
@@ -1228,12 +1202,14 @@ export default function WeeklyTrainingDashboardApp() {
             </div>
           </TabsContent>
 
+          {/* SETTINGS */}
           <TabsContent value="settings">
             <div className="mt-4 grid grid-cols-1 gap-4">
               <Card className="rounded-2xl shadow-sm">
                 <CardHeader>
                   <CardTitle className="text-base">HR zone thresholds (for Strava HR streams)</CardTitle>
                 </CardHeader>
+
                 <CardContent>
                   <p className="text-sm text-muted-foreground">
                     Set the <span className="font-medium">lower bound</span> BPM for each zone.
@@ -1267,6 +1243,7 @@ export default function WeeklyTrainingDashboardApp() {
                 <CardHeader>
                   <CardTitle className="text-base">Strava sync</CardTitle>
                 </CardHeader>
+
                 <CardContent>
                   {strava.connected ? (
                     <div className="flex flex-wrap items-center gap-2">
@@ -1284,7 +1261,8 @@ export default function WeeklyTrainingDashboardApp() {
                   )}
 
                   <div className="mt-3 text-xs text-muted-foreground">
-                    Backend endpoints must exist under <span className="font-medium">/api/strava</span>.
+                    Backend endpoints must exist under{" "}
+                    <span className="font-medium">/api/strava</span>.
                   </div>
                 </CardContent>
               </Card>
