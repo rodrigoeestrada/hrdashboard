@@ -376,18 +376,50 @@ function pct(part: number, total: number) {
   return (part / total) * 100;
 }
 
-function buildLegendPayload(
-  data: { name: string; value: number }[],
-  colorFor: (name: string) => string,
-  totalValue: number,
-  valueFormatter: (v: number) => string
-) {
-  return data.map((d) => ({
-    id: d.name,
-    type: "square" as const,
-    value: `${d.name} · ${valueFormatter(d.value)} · ${pct(d.value, totalValue).toFixed(0)}%`,
-    color: colorFor(d.name),
-  }));
+function renderPercentLabel({
+  cx,
+  cy,
+  midAngle,
+  innerRadius,
+  outerRadius,
+  percent,
+}: any) {
+  // Don’t label tiny slices.
+  if (!percent || percent < 0.04) return null;
+
+  const RADIAN = Math.PI / 180;
+  const r = innerRadius + (outerRadius - innerRadius) * 0.6;
+  const x = cx + r * Math.cos(-midAngle * RADIAN);
+  const y = cy + r * Math.sin(-midAngle * RADIAN);
+
+  return (
+    <text x={x} y={y} fill="currentColor" textAnchor="middle" dominantBaseline="central" className="text-[11px] font-medium">
+      {(percent * 100).toFixed(0)}%
+    </text>
+  );
+}
+
+function LegendList({
+  items,
+}: {
+  items: { name: string; color: string; valueMin: number; totalMin: number }[];
+}) {
+  return (
+    <div className="mt-2 flex flex-col gap-1 text-xs text-muted-foreground">
+      {items.map((it) => {
+        const p = pct(it.valueMin, it.totalMin).toFixed(0);
+        return (
+          <div key={it.name} className="flex items-center gap-2">
+            <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: it.color }} />
+            <span className="truncate">
+              <span className="font-medium text-foreground">{it.name}</span>
+              <span className="text-muted-foreground"> · {formatDuration(it.valueMin)} · {p}%</span>
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function renderPercentLabel({
@@ -411,6 +443,32 @@ function renderPercentLabel({
       {(percent * 100).toFixed(0)}%
     </text>
   );
+}
+
+  let z1 = 0,
+    z2 = 0,
+    z3 = 0,
+    z4 = 0,
+    z5 = 0;
+
+  for (let i = 1; i < hr.length; i++) {
+    const dt = Math.max(0, (time[i] ?? 0) - (time[i - 1] ?? 0));
+    const bpm = hr[i] ?? 0;
+    if (bpm >= zones.z5Low) z5 += dt;
+    else if (bpm >= zones.z4Low) z4 += dt;
+    else if (bpm >= zones.z3Low) z3 += dt;
+    else if (bpm >= zones.z2Low) z2 += dt;
+    else z1 += dt;
+  }
+
+  return {
+    z1Min: Math.round(z1 / 60),
+    z2Min: Math.round(z2 / 60),
+    z3Min: Math.round(z3 / 60),
+    z4Min: Math.round(z4 / 60),
+    z5Min: Math.round(z5 / 60),
+    hasStreams: true,
+  };
 }
 
 async function apiGet<T>(url: string): Promise<T> {
@@ -509,15 +567,7 @@ export default function WeeklyTrainingDashboardApp() {
     [totals]
   );
 
-  const zoneLegendPayload = useMemo(() => {
-    const total = zoneChartData.reduce((a, b) => a + b.value, 0);
-    return buildLegendPayload(
-      zoneChartData,
-      (n) => (ZONE_COLORS as any)[n] || "#94A3B8",
-      total,
-      (v) => formatDuration(v)
-    );
-  }, [zoneChartData]);
+  const zoneTotalForPct = useMemo(() => zoneChartData.reduce((a, b) => a + b.value, 0), [zoneChartData]);
 
   const activityChartData = useMemo(
     () =>
@@ -527,15 +577,7 @@ export default function WeeklyTrainingDashboardApp() {
     [totals]
   );
 
-  const activityLegendPayload = useMemo(() => {
-    const total = activityChartData.reduce((a, b) => a + b.value, 0);
-    return buildLegendPayload(
-      activityChartData,
-      (n) => (ACTIVITY_COLORS as any)[n] || "#94A3B8",
-      total,
-      (v) => formatDuration(v)
-    );
-  }, [activityChartData]);
+  const activityTotalForPct = useMemo(() => activityChartData.reduce((a, b) => a + b.value, 0), [activityChartData]);
 
   const byDay = useMemo(() => {
     const labels = Array.from({ length: 7 }, (_, i) => addDaysISO(weekStartISO, i));
@@ -908,33 +950,45 @@ export default function WeeklyTrainingDashboardApp() {
                       Add sessions or sync Strava to see zone distribution.
                     </div>
                   ) : (
-                    <div className="h-[240px]">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie
-                            data={zoneChartData}
-                            dataKey="value"
-                            nameKey="name"
-                            outerRadius={95}
-                            labelLine={false}
-                            label={renderPercentLabel}
-                          >
-                            {zoneChartData.map((entry) => (
-                              <Cell key={entry.name} fill={(ZONE_COLORS as any)[entry.name]} />
-                            ))}
-                          </Pie>
-                          <Tooltip
-                            formatter={(v: any, _n: any, p: any) => {
-                              const total = zoneChartData.reduce((a, b) => a + b.value, 0);
-                              const val = Number(v);
-                              const perc = pct(val, total).toFixed(0);
-                              return [`${formatDuration(val)} (${perc}%)`, p?.name];
-                            }}
-                          />
-                          <Legend payload={zoneLegendPayload as any} />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </div>
+                    <>
+                      <div className="h-[240px]">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie
+                              data={zoneChartData}
+                              dataKey="value"
+                              nameKey="name"
+                              outerRadius={95}
+                              labelLine={false}
+                              label={renderPercentLabel}
+                            >
+                              {zoneChartData.map((entry) => (
+                                <Cell key={entry.name} fill={(ZONE_COLORS as any)[entry.name]} />
+                              ))}
+                            </Pie>
+                            <Tooltip
+                              formatter={(v: any, _n: any, p: any) => {
+                                const total = zoneChartData.reduce((a, b) => a + b.value, 0);
+                                const val = Number(v);
+                                const perc = pct(val, total).toFixed(0);
+                                return [`${formatDuration(val)} (${perc}%)`, p?.name];
+                              }}
+                            />
+                            {/* keep Legend component mounted for layout consistency */}
+                            <Legend content={() => null} />
+                          </PieChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <LegendList
+                        items={zoneChartData.map((d) => ({
+                          name: d.name,
+                          color: (ZONE_COLORS as any)[d.name] || "#94A3B8",
+                          valueMin: d.value,
+                          totalMin: zoneTotalForPct,
+                        }))}
+                      />
+                    </>
+                  )}
                   )}
                 </CardContent>
               </Card>
@@ -968,33 +1022,44 @@ export default function WeeklyTrainingDashboardApp() {
                       Add sessions or sync Strava to see the activity breakdown.
                     </div>
                   ) : (
-                    <div className="h-[240px]">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie
-                            data={activityChartData}
-                            dataKey="value"
-                            nameKey="name"
-                            outerRadius={95}
-                            labelLine={false}
-                            label={renderPercentLabel}
-                          >
-                            {activityChartData.map((entry) => (
-                              <Cell key={entry.name} fill={(ACTIVITY_COLORS as any)[entry.name]} />
-                            ))}
-                          </Pie>
-                          <Tooltip
-                            formatter={(v: any, _n: any, p: any) => {
-                              const total = activityChartData.reduce((a, b) => a + b.value, 0);
-                              const val = Number(v);
-                              const perc = pct(val, total).toFixed(0);
-                              return [`${formatDuration(val)} (${perc}%)`, p?.name];
-                            }}
-                          />
-                          <Legend payload={activityLegendPayload as any} />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </div>
+                    <>
+                      <div className="h-[240px]">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie
+                              data={activityChartData}
+                              dataKey="value"
+                              nameKey="name"
+                              outerRadius={95}
+                              labelLine={false}
+                              label={renderPercentLabel}
+                            >
+                              {activityChartData.map((entry) => (
+                                <Cell key={entry.name} fill={(ACTIVITY_COLORS as any)[entry.name]} />
+                              ))}
+                            </Pie>
+                            <Tooltip
+                              formatter={(v: any, _n: any, p: any) => {
+                                const total = activityChartData.reduce((a, b) => a + b.value, 0);
+                                const val = Number(v);
+                                const perc = pct(val, total).toFixed(0);
+                                return [`${formatDuration(val)} (${perc}%)`, p?.name];
+                              }}
+                            />
+                            <Legend content={() => null} />
+                          </PieChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <LegendList
+                        items={activityChartData.map((d) => ({
+                          name: d.name,
+                          color: (ACTIVITY_COLORS as any)[d.name] || "#94A3B8",
+                          valueMin: d.value,
+                          totalMin: activityTotalForPct,
+                        }))}
+                      />
+                    </>
+                  )}
                   )}
                 </CardContent>
               </Card>
