@@ -1,16 +1,22 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-
-async function getAccessToken() {
-  const c = await cookies();
-  const raw = c.get("strava_tokens")?.value;
-  if (!raw) return null;
-  const tok = JSON.parse(raw);
-  return tok.access_token as string;
-}
+import { COOKIE_NAME, verifySessionToken } from "@/lib/session";
+import { getValidStravaAccessToken } from "@/lib/strava";
 
 export async function GET(req: Request) {
-  const access = await getAccessToken();
+  const c = await cookies();
+  const raw = c.get(COOKIE_NAME)?.value;
+  if (!raw) return NextResponse.json({ error: "not_connected" }, { status: 401 });
+
+  let athleteId: number;
+  try {
+    const session = await verifySessionToken(raw);
+    athleteId = session.athleteId;
+  } catch {
+    return NextResponse.json({ error: "invalid_session" }, { status: 401 });
+  }
+
+  const access = await getValidStravaAccessToken(athleteId);
   if (!access) return NextResponse.json({ error: "not_connected" }, { status: 401 });
 
   const url = new URL(req.url);
@@ -27,7 +33,10 @@ export async function GET(req: Request) {
     cache: "no-store",
   });
 
-  if (!r.ok) return NextResponse.json({ error: "strava_failed" }, { status: r.status });
-  const data = await r.json();
-  return NextResponse.json(data);
+  const text = await r.text();
+  if (!r.ok) {
+    return NextResponse.json({ error: "strava_failed", status: r.status, body: text }, { status: r.status });
+  }
+
+  return NextResponse.json(JSON.parse(text));
 }
