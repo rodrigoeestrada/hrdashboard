@@ -2,12 +2,10 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-
 import {
   Select,
   SelectContent,
@@ -15,7 +13,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-
 import {
   Table,
   TableBody,
@@ -24,11 +21,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
 import { Separator } from "@/components/ui/separator";
-
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-
 import {
   Trash2,
   Plus,
@@ -37,8 +31,8 @@ import {
   Link2,
   RefreshCcw,
   LogOut,
+  Save,
 } from "lucide-react";
-
 import {
   PieChart,
   Pie,
@@ -52,40 +46,24 @@ import {
   Cell,
 } from "recharts";
 
-/**
- * Weekly Training Dashboard (Strava + Manual) - CLEAN REBUILD
- *
- * Features:
- * - Z1–Z5 totals where Unzoned time counts as Z1
- * - Aerobic = Z1 + Z2
- * - Anaerobic = Z4 + Z5
- * - Activity totals: Run, Lift, Swim, Bike, Cardio (everything else)
- * - Zone colors + activity colors
- * - Pie labels show % inside slices + legend list with time + %
- * - Strava connect + sync week (expects /api/strava/* endpoints already in your app)
- */
-
-const STORAGE_KEY = "weekly-training-dashboard:v5-clean";
+const STORAGE_KEY_BASE = "weekly-training-dashboard:v6";
 
 const ACTIVITY_TYPES = ["Run", "Lift", "Swim", "Bike", "Cardio"] as const;
 type ActivityType = (typeof ACTIVITY_TYPES)[number];
 
 type Session = {
   id: string;
-  date: string; // YYYY-MM-DD
+  date: string;
   type: ActivityType;
   durationMin: number;
-
   z1Min: number;
   z2Min: number;
   z3Min: number;
   z4Min: number;
   z5Min: number;
-
   notes?: string;
-
   source?: "manual" | "strava";
-  externalId?: string; // strava activity id
+  externalId?: string;
 };
 
 type HrZones = {
@@ -102,14 +80,20 @@ const DEFAULT_HR_ZONES: HrZones = {
   z5Low: 180,
 };
 
+type AthleteMe = {
+  connected: boolean;
+  athleteId: number;
+  athleteName?: string;
+};
+
 type StravaActivity = {
   id: number;
   name: string;
   type: string;
   sport_type?: string;
-  start_date: string; // ISO
-  moving_time: number; // seconds
-  elapsed_time: number; // seconds
+  start_date: string;
+  moving_time: number;
+  elapsed_time: number;
   average_heartrate?: number;
   max_heartrate?: number;
 };
@@ -120,11 +104,11 @@ type StravaStreamsResponse = {
 };
 
 const ZONE_COLORS: Record<"Z1" | "Z2" | "Z3" | "Z4" | "Z5", string> = {
-  Z1: "#7DD3FC", // light blue
-  Z2: "#22C55E", // green
-  Z3: "#FACC15", // yellow
-  Z4: "#FB923C", // orange
-  Z5: "#EF4444", // red
+  Z1: "#7DD3FC",
+  Z2: "#22C55E",
+  Z3: "#FACC15",
+  Z4: "#FB923C",
+  Z5: "#EF4444",
 };
 
 const ACTIVITY_COLORS: Record<ActivityType, string> = {
@@ -135,7 +119,6 @@ const ACTIVITY_COLORS: Record<ActivityType, string> = {
   Cardio: "#64748B",
 };
 
-// ---------- helpers ----------
 function uid() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
@@ -156,8 +139,8 @@ function pct(part: number, total: number) {
 
 function startOfWeekISO(d = new Date()) {
   const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const day = date.getUTCDay(); // 0=Sun
-  const diff = day === 0 ? -6 : 1 - day; // Monday start
+  const day = date.getUTCDay();
+  const diff = day === 0 ? -6 : 1 - day;
   date.setUTCDate(date.getUTCDate() + diff);
   return date.toISOString().slice(0, 10);
 }
@@ -189,7 +172,7 @@ function formatDuration(minTotal: number) {
   return `${h}h ${rem}m`;
 }
 
-function normalizeTypeToActivityType(input: any): ActivityType {
+function normalizeTypeToActivityType(input: unknown): ActivityType {
   const t = String(input || "").toLowerCase();
   if (t === "run") return "Run";
   if (t === "lift" || t === "strength" || t === "weights" || t === "weight") return "Lift";
@@ -208,80 +191,49 @@ function mapStravaToActivityType(stravaType: string, sportType?: string): Activi
 }
 
 function normalizeSession(s: Partial<Session>): Session {
-  const durationMin = clampNonNeg(Number(s.durationMin ?? 0));
-  const z1Min = clampNonNeg(Number(s.z1Min ?? 0));
-  const z2Min = clampNonNeg(Number(s.z2Min ?? 0));
-  const z3Min = clampNonNeg(Number(s.z3Min ?? 0));
-  const z4Min = clampNonNeg(Number(s.z4Min ?? 0));
-  const z5Min = clampNonNeg(Number(s.z5Min ?? 0));
-
   return {
     id: typeof s.id === "string" ? s.id : uid(),
     date: typeof s.date === "string" ? s.date : new Date().toISOString().slice(0, 10),
     type: normalizeTypeToActivityType((s as any).type),
-    durationMin,
-    z1Min,
-    z2Min,
-    z3Min,
-    z4Min,
-    z5Min,
+    durationMin: clampNonNeg(Number(s.durationMin ?? 0)),
+    z1Min: clampNonNeg(Number(s.z1Min ?? 0)),
+    z2Min: clampNonNeg(Number(s.z2Min ?? 0)),
+    z3Min: clampNonNeg(Number(s.z3Min ?? 0)),
+    z4Min: clampNonNeg(Number(s.z4Min ?? 0)),
+    z5Min: clampNonNeg(Number(s.z5Min ?? 0)),
     notes: typeof s.notes === "string" ? s.notes : "",
     source: s.source === "strava" ? "strava" : "manual",
     externalId: typeof s.externalId === "string" ? s.externalId : undefined,
   };
 }
 
-function safeLoad(): {
-  weekStartISO: string;
-  sessions: Session[];
-  hrZones: HrZones;
-  strava?: { connected: boolean; athleteName?: string };
-} {
+function getStorageKey(athleteId?: number | null) {
+  return athleteId ? `${STORAGE_KEY_BASE}:${athleteId}` : STORAGE_KEY_BASE;
+}
+
+function safeLoad(athleteId?: number | null): { weekStartISO: string; sessions: Session[] } {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return {
-        weekStartISO: startOfWeekISO(),
-        sessions: [],
-        hrZones: DEFAULT_HR_ZONES,
-        strava: { connected: false },
-      };
-    }
+    const raw = localStorage.getItem(getStorageKey(athleteId));
+    if (!raw) return { weekStartISO: startOfWeekISO(), sessions: [] };
     const parsed = JSON.parse(raw);
     return {
       weekStartISO: typeof parsed.weekStartISO === "string" ? parsed.weekStartISO : startOfWeekISO(),
       sessions: Array.isArray(parsed.sessions) ? parsed.sessions.map(normalizeSession) : [],
-      hrZones:
-        parsed.hrZones && typeof parsed.hrZones === "object"
-          ? {
-              z2Low: Number(parsed.hrZones.z2Low ?? DEFAULT_HR_ZONES.z2Low),
-              z3Low: Number(parsed.hrZones.z3Low ?? DEFAULT_HR_ZONES.z3Low),
-              z4Low: Number(parsed.hrZones.z4Low ?? DEFAULT_HR_ZONES.z4Low),
-              z5Low: Number(parsed.hrZones.z5Low ?? DEFAULT_HR_ZONES.z5Low),
-            }
-          : DEFAULT_HR_ZONES,
-      strava:
-        parsed.strava && typeof parsed.strava === "object" ? parsed.strava : { connected: false },
     };
   } catch {
-    return {
-      weekStartISO: startOfWeekISO(),
-      sessions: [],
-      hrZones: DEFAULT_HR_ZONES,
-      strava: { connected: false },
-    };
+    return { weekStartISO: startOfWeekISO(), sessions: [] };
   }
 }
 
-function safeSave(data: any) {
+function safeSave(athleteId: number | null | undefined, data: { weekStartISO: string; sessions: Session[] }) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    localStorage.setItem(getStorageKey(athleteId), JSON.stringify(data));
   } catch {
     // ignore
   }
 }
 
-function downloadJson(filename: string, data: any) {
+function downloadJson(filename: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -294,12 +246,18 @@ function downloadJson(filename: string, data: any) {
 function getZonedMinutes(s: Session) {
   return s.z1Min + s.z2Min + s.z3Min + s.z4Min + s.z5Min;
 }
+
 function getUnzonedMinutes(s: Session) {
   return Math.max(0, s.durationMin - getZonedMinutes(s));
 }
 
 function weekZoneTotalsAdjustedToZ1(sessions: Session[]) {
-  let z1 = 0, z2 = 0, z3 = 0, z4 = 0, z5 = 0;
+  let z1 = 0;
+  let z2 = 0;
+  let z3 = 0;
+  let z4 = 0;
+  let z5 = 0;
+
   for (const s of sessions) {
     z1 += s.z1Min + getUnzonedMinutes(s);
     z2 += s.z2Min;
@@ -307,6 +265,7 @@ function weekZoneTotalsAdjustedToZ1(sessions: Session[]) {
     z4 += s.z4Min;
     z5 += s.z5Min;
   }
+
   return { z1, z2, z3, z4, z5 };
 }
 
@@ -333,17 +292,19 @@ function warnZones(s: Session) {
 function computeZoneMinutesFromStreams(streams: StravaStreamsResponse, zones: HrZones) {
   const hr = streams.heartrate?.data;
   const time = streams.time?.data;
-
   if (!hr || !time || hr.length < 2 || time.length < 2 || hr.length !== time.length) {
     return { z1Min: 0, z2Min: 0, z3Min: 0, z4Min: 0, z5Min: 0, hasStreams: false };
   }
 
-  let z1 = 0, z2 = 0, z3 = 0, z4 = 0, z5 = 0;
+  let z1 = 0;
+  let z2 = 0;
+  let z3 = 0;
+  let z4 = 0;
+  let z5 = 0;
 
   for (let i = 1; i < hr.length; i++) {
-    const dt = Math.max(0, (time[i] ?? 0) - (time[i - 1] ?? 0)); // seconds
+    const dt = Math.max(0, (time[i] ?? 0) - (time[i - 1] ?? 0));
     const bpm = hr[i] ?? 0;
-
     if (bpm >= zones.z5Low) z5 += dt;
     else if (bpm >= zones.z4Low) z4 += dt;
     else if (bpm >= zones.z3Low) z3 += dt;
@@ -361,18 +322,10 @@ function computeZoneMinutesFromStreams(streams: StravaStreamsResponse, zones: Hr
   };
 }
 
-function renderPercentLabel({
-  cx,
-  cy,
-  midAngle,
-  innerRadius,
-  outerRadius,
-  percent,
-}: any) {
-  if (!percent || percent < 0.04) return null; // hide tiny slices
-
+function renderPercentLabel({ cx, cy, midAngle, innerRadius, outerRadius, percent }: any) {
+  if (!percent || percent < 0.04) return null;
   const RADIAN = Math.PI / 180;
-  const r = innerRadius + (outerRadius - innerRadius) * 0.6;
+  const r = innerRadius + (outerRadius - innerRadius) * 0.62;
   const x = cx + r * Math.cos(-midAngle * RADIAN);
   const y = cy + r * Math.sin(-midAngle * RADIAN);
 
@@ -402,10 +355,7 @@ function LegendList({
           <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: it.color }} />
           <span className="truncate">
             <span className="font-medium text-foreground">{it.name}</span>
-            <span className="text-muted-foreground">
-              {" "}
-              · {formatDuration(it.valueMin)} · {pct(it.valueMin, it.totalMin).toFixed(0)}%
-            </span>
+            <span className="text-muted-foreground"> · {formatDuration(it.valueMin)} · {pct(it.valueMin, it.totalMin).toFixed(0)}%</span>
           </span>
         </div>
       ))}
@@ -419,7 +369,7 @@ async function apiGet<T>(url: string): Promise<T> {
   return res.json();
 }
 
-async function apiPost<T>(url: string, body?: any): Promise<T> {
+async function apiPost<T>(url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -430,43 +380,132 @@ async function apiPost<T>(url: string, body?: any): Promise<T> {
   return res.json();
 }
 
-// ---------- component ----------
-export default function WeeklyTrainingDashboardApp() {
-  const loaded = useMemo(() => safeLoad(), []);
+function HrZonesModal({
+  open,
+  values,
+  onChange,
+  onSave,
+  saving,
+}: {
+  open: boolean;
+  values: HrZones;
+  onChange: (next: HrZones) => void;
+  onSave: () => void;
+  saving: boolean;
+}) {
+  if (!open) return null;
 
-  const [weekStartISO, setWeekStartISO] = useState<string>(loaded.weekStartISO);
-  const [sessions, setSessions] = useState<Session[]>(loaded.sessions);
-  const [hrZones, setHrZones] = useState<HrZones>(loaded.hrZones);
-  const [strava, setStrava] = useState<{ connected: boolean; athleteName?: string }>(
-    loaded.strava ?? { connected: false }
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="w-full max-w-lg rounded-2xl border bg-background shadow-2xl">
+        <div className="border-b px-6 py-4">
+          <h2 className="text-lg font-semibold">Set your heart-rate zones</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            We’ll save these values to your account and reuse them every time you log in.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 px-6 py-5 sm:grid-cols-2">
+          {([
+            ["Zone 2 starts", "z2Low"],
+            ["Zone 3 starts", "z3Low"],
+            ["Zone 4 starts", "z4Low"],
+            ["Zone 5 starts", "z5Low"],
+          ] as const).map(([label, key]) => (
+            <div key={key} className="grid gap-1">
+              <Label>{label} (BPM)</Label>
+              <Input
+                inputMode="numeric"
+                value={String(values[key])}
+                onChange={(e) => onChange({ ...values, [key]: parseNum(e.target.value) })}
+              />
+            </div>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t px-6 py-4">
+          <Button onClick={onSave} disabled={saving}>
+            <Save className="mr-2 h-4 w-4" /> {saving ? "Saving..." : "Save zones"}
+          </Button>
+        </div>
+      </div>
+    </div>
   );
+}
 
-  const [activeTab, setActiveTab] = useState<string>("dashboard");
-  const [syncStatus, setSyncStatus] = useState<string>("");
-  const [syncError, setSyncError] = useState<string>("");
+export default function WeeklyTrainingDashboardApp() {
+  const [authLoading, setAuthLoading] = useState(true);
+  const [athlete, setAthlete] = useState<AthleteMe | null>(null);
+  const [activeTab, setActiveTab] = useState("dashboard");
+
+  const [weekStartISO, setWeekStartISO] = useState(startOfWeekISO());
+  const [sessions, setSessions] = useState<Session[]>([]);
+
+  const [hrZones, setHrZones] = useState<HrZones>(DEFAULT_HR_ZONES);
+  const [showHrModal, setShowHrModal] = useState(false);
+  const [savingHrZones, setSavingHrZones] = useState(false);
+
+  const [syncStatus, setSyncStatus] = useState("");
+  const [syncError, setSyncError] = useState("");
+
+  const [form, setForm] = useState<Partial<Session>>({
+    date: startOfWeekISO(),
+    type: "Run",
+    durationMin: 60,
+    z1Min: 0,
+    z2Min: 60,
+    z3Min: 0,
+    z4Min: 0,
+    z5Min: 0,
+    notes: "",
+    source: "manual",
+  });
 
   useEffect(() => {
-    safeSave({ weekStartISO, sessions, hrZones, strava });
-  }, [weekStartISO, sessions, hrZones, strava]);
+    const boot = async () => {
+      try {
+        const me = await apiGet<AthleteMe>("/api/strava/me");
+        setAthlete(me);
 
-  useEffect(() => {
-    const url = new URL(window.location.href);
-    const connected = url.searchParams.get("strava_connected");
-    const athlete = url.searchParams.get("athlete");
-    if (connected === "1") {
-      setStrava({ connected: true, athleteName: athlete || undefined });
-      setActiveTab("dashboard");
-      url.searchParams.delete("strava_connected");
-      url.searchParams.delete("athlete");
-      window.history.replaceState({}, "", url.toString());
-    }
+        const local = safeLoad(me.athleteId);
+        setWeekStartISO(local.weekStartISO);
+        setSessions(local.sessions);
+        setForm((f) => ({ ...f, date: local.weekStartISO }));
+
+        try {
+          const settings = await apiGet<{ hrZones?: HrZones | null }>("/api/athlete-settings");
+          if (settings.hrZones) {
+            setHrZones(settings.hrZones);
+            setShowHrModal(false);
+          } else {
+            setHrZones(DEFAULT_HR_ZONES);
+            setShowHrModal(true);
+          }
+        } catch {
+          setHrZones(DEFAULT_HR_ZONES);
+          setShowHrModal(true);
+        }
+      } catch {
+        setAthlete(null);
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+
+    boot();
   }, []);
 
+  useEffect(() => {
+    if (!athlete?.athleteId) return;
+    safeSave(athlete.athleteId, { weekStartISO, sessions });
+  }, [athlete?.athleteId, weekStartISO, sessions]);
+
+  useEffect(() => {
+    setForm((f) => ({ ...f, date: weekStartISO }));
+  }, [weekStartISO]);
+
   const weekSessions = useMemo(
-    () =>
-      sessions
-        .filter((s) => withinWeek(s.date, weekStartISO))
-        .sort((a, b) => (a.date < b.date ? -1 : 1)),
+    () => sessions.filter((s) => withinWeek(s.date, weekStartISO)).sort((a, b) => (a.date < b.date ? -1 : 1)),
     [sessions, weekStartISO]
   );
 
@@ -474,44 +513,38 @@ export default function WeeklyTrainingDashboardApp() {
 
   const totals = useMemo(() => {
     const totalMin = weekSessions.reduce((acc, s) => acc + s.durationMin, 0);
-
     const z = weekZoneTotalsAdjustedToZ1(weekSessions);
-    const z1Min = z.z1;
-    const z2Min = z.z2;
-    const z3Min = z.z3;
-    const z4Min = z.z4;
-    const z5Min = z.z5;
-
-    const aerobicMin = z1Min + z2Min;
-    const anaerobicMin = z4Min + z5Min;
-
+    const aerobicMin = z.z1 + z.z2;
+    const anaerobicMin = z.z4 + z.z5;
     const activityMin = activityTotals(weekSessions);
-
-    return { totalMin, z1Min, z2Min, z3Min, z4Min, z5Min, aerobicMin, anaerobicMin, activityMin };
+    return {
+      totalMin,
+      z1Min: z.z1,
+      z2Min: z.z2,
+      z3Min: z.z3,
+      z4Min: z.z4,
+      z5Min: z.z5,
+      aerobicMin,
+      anaerobicMin,
+      activityMin,
+    };
   }, [weekSessions]);
 
   const zoneChartData = useMemo(
-    () =>
-      [
-        { name: "Z1", value: totals.z1Min },
-        { name: "Z2", value: totals.z2Min },
-        { name: "Z3", value: totals.z3Min },
-        { name: "Z4", value: totals.z4Min },
-        { name: "Z5", value: totals.z5Min },
-      ].filter((x) => x.value > 0),
+    () => [
+      { name: "Z1", value: totals.z1Min },
+      { name: "Z2", value: totals.z2Min },
+      { name: "Z3", value: totals.z3Min },
+      { name: "Z4", value: totals.z4Min },
+      { name: "Z5", value: totals.z5Min },
+    ].filter((x) => x.value > 0),
     [totals]
   );
 
-  const zoneTotalForPct = useMemo(
-    () => zoneChartData.reduce((a, b) => a + b.value, 0),
-    [zoneChartData]
-  );
+  const zoneTotalForPct = useMemo(() => zoneChartData.reduce((a, b) => a + b.value, 0), [zoneChartData]);
 
   const activityChartData = useMemo(
-    () =>
-      (ACTIVITY_TYPES as unknown as ActivityType[])
-        .map((t) => ({ name: t, value: totals.activityMin[t] }))
-        .filter((x) => x.value > 0),
+    () => ACTIVITY_TYPES.map((t) => ({ name: t, value: totals.activityMin[t] })).filter((x) => x.value > 0),
     [totals]
   );
 
@@ -523,42 +556,13 @@ export default function WeeklyTrainingDashboardApp() {
   const byDay = useMemo(() => {
     const labels = Array.from({ length: 7 }, (_, i) => addDaysISO(weekStartISO, i));
     const map = new Map<string, number>(labels.map((d) => [d, 0]));
-    for (const s of weekSessions) {
-      map.set(s.date, (map.get(s.date) ?? 0) + s.durationMin);
-    }
+    for (const s of weekSessions) map.set(s.date, (map.get(s.date) ?? 0) + s.durationMin);
     return labels.map((date) => ({ date: date.slice(5), minutes: map.get(date) ?? 0 }));
   }, [weekSessions, weekStartISO]);
-
-  const [form, setForm] = useState<Partial<Session>>(() => ({
-    date: weekStartISO,
-    type: "Run",
-    durationMin: 60,
-    z1Min: 0,
-    z2Min: 60,
-    z3Min: 0,
-    z4Min: 0,
-    z5Min: 0,
-    notes: "",
-    source: "manual",
-  }));
-
-  useEffect(() => {
-    setForm((f) => ({ ...f, date: weekStartISO }));
-  }, [weekStartISO]);
 
   function addSession() {
     const s = normalizeSession({ ...form, source: "manual" });
     setSessions((prev) => [s, ...prev]);
-    setForm((f) => ({
-      ...f,
-      durationMin: 60,
-      z1Min: 0,
-      z2Min: 60,
-      z3Min: 0,
-      z4Min: 0,
-      z5Min: 0,
-      notes: "",
-    }));
   }
 
   function removeSession(id: string) {
@@ -570,7 +574,7 @@ export default function WeeklyTrainingDashboardApp() {
   }
 
   function exportData() {
-    downloadJson(`weekly-training-${weekStartISO}.json`, { weekStartISO, sessions, hrZones, strava });
+    downloadJson(`weekly-training-${weekStartISO}.json`, { weekStartISO, sessions });
   }
 
   function importData(file: File) {
@@ -578,32 +582,26 @@ export default function WeeklyTrainingDashboardApp() {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result ?? ""));
-        const nextWeek = typeof parsed.weekStartISO === "string" ? parsed.weekStartISO : weekStartISO;
-        const nextSessions = Array.isArray(parsed.sessions) ? parsed.sessions.map(normalizeSession) : sessions;
-
-        setWeekStartISO(nextWeek);
-        setSessions(nextSessions);
-
-        if (parsed.hrZones) {
-          setHrZones({
-            z2Low: Number(parsed.hrZones.z2Low ?? hrZones.z2Low),
-            z3Low: Number(parsed.hrZones.z3Low ?? hrZones.z3Low),
-            z4Low: Number(parsed.hrZones.z4Low ?? hrZones.z4Low),
-            z5Low: Number(parsed.hrZones.z5Low ?? hrZones.z5Low),
-          });
-        }
-
-        if (parsed.strava) {
-          setStrava({
-            connected: Boolean(parsed.strava.connected),
-            athleteName: parsed.strava.athleteName,
-          });
-        }
+        setWeekStartISO(typeof parsed.weekStartISO === "string" ? parsed.weekStartISO : weekStartISO);
+        setSessions(Array.isArray(parsed.sessions) ? parsed.sessions.map(normalizeSession) : sessions);
       } catch {
         // ignore
       }
     };
     reader.readAsText(file);
+  }
+
+  async function saveHrZones() {
+    setSavingHrZones(true);
+    setSyncError("");
+    try {
+      await apiPost("/api/athlete-settings", { hrZones });
+      setShowHrModal(false);
+    } catch (e: any) {
+      setSyncError(e?.message || "Failed to save heart-rate zones");
+    } finally {
+      setSavingHrZones(false);
+    }
   }
 
   async function connectStrava() {
@@ -623,7 +621,8 @@ export default function WeeklyTrainingDashboardApp() {
     setSyncStatus("Disconnecting…");
     try {
       await apiPost<{ ok: true }>("/api/strava/logout");
-      setStrava({ connected: false });
+      setAthlete(null);
+      setSessions([]);
       setSyncStatus("");
     } catch (e: any) {
       setSyncStatus("");
@@ -638,10 +637,7 @@ export default function WeeklyTrainingDashboardApp() {
     try {
       const after = isoToUnixSeconds(weekStartISO + "T00:00:00Z");
       const before = isoToUnixSeconds(addDaysISO(weekStartISO, 7) + "T00:00:00Z");
-
-      const activities = await apiGet<StravaActivity[]>(
-        `/api/strava/activities?after=${after}&before=${before}`
-      );
+      const activities = await apiGet<StravaActivity[]>(`/api/strava/activities?after=${after}&before=${before}`);
 
       const baseSessions: Session[] = activities.map((a) => {
         const dateISO = new Date(a.start_date).toISOString().slice(0, 10);
@@ -657,24 +653,15 @@ export default function WeeklyTrainingDashboardApp() {
         });
       });
 
-      // Limit HR stream fetches (Strava rate limits)
-      const withHr = activities.filter(
-        (a) => typeof a.average_heartrate === "number" || typeof a.max_heartrate === "number"
-      );
-
+      const withHr = activities.filter((a) => typeof a.average_heartrate === "number" || typeof a.max_heartrate === "number");
       const streamFetchCount = Math.min(withHr.length, 25);
-      const zoneByActivityId = new Map<
-        number,
-        { z1Min: number; z2Min: number; z3Min: number; z4Min: number; z5Min: number }
-      >();
+      const zoneByActivityId = new Map<number, { z1Min: number; z2Min: number; z3Min: number; z4Min: number; z5Min: number }>();
 
       for (let i = 0; i < streamFetchCount; i++) {
         const a = withHr[i];
         setSyncStatus(`Syncing zones (${i + 1}/${streamFetchCount})…`);
         try {
-          const streams = await apiGet<StravaStreamsResponse>(
-            `/api/strava/streams?activityId=${a.id}`
-          );
+          const streams = await apiGet<StravaStreamsResponse>(`/api/strava/streams?activityId=${a.id}`);
           const z = computeZoneMinutesFromStreams(streams, hrZones);
           if (z.hasStreams) {
             zoneByActivityId.set(a.id, {
@@ -693,45 +680,62 @@ export default function WeeklyTrainingDashboardApp() {
       const mergedSessions = baseSessions.map((s) => {
         const idNum = Number(s.externalId || 0);
         const z = zoneByActivityId.get(idNum);
-        if (!z) return s;
-        return normalizeSession({ ...s, ...z });
+        return z ? normalizeSession({ ...s, ...z }) : s;
       });
 
       setSessions((prev) => {
-        // Keep manual sessions always. Replace Strava sessions ONLY for the selected week.
         const keepManual = prev.filter((p) => p.source !== "strava" || !withinWeek(p.date, weekStartISO));
         return [...mergedSessions, ...keepManual];
       });
 
       setSyncStatus(`Synced ${activities.length} activities. Zones computed for up to ${streamFetchCount}.`);
       setTimeout(() => setSyncStatus(""), 2500);
-
-      try {
-        const me = await apiGet<{ athleteName?: string }>("/api/strava/me");
-        setStrava({ connected: true, athleteName: me.athleteName });
-      } catch {
-        setStrava({ connected: true });
-      }
     } catch (e: any) {
       setSyncStatus("");
       setSyncError(e?.message || "Failed to sync from Strava");
     }
   }
 
+  if (authLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background p-6">
+        <div className="text-sm text-muted-foreground">Loading dashboard...</div>
+      </div>
+    );
+  }
+
+  if (!athlete?.connected) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background p-6">
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="w-full max-w-md">
+          <Card className="rounded-2xl shadow-sm">
+            <CardHeader>
+              <CardTitle className="text-2xl">Training Zones Dashboard</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Connect your Strava account to load your training data, heart-rate zones, and weekly dashboard.
+              </p>
+              {syncError && <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{syncError}</div>}
+              <Button onClick={connectStrava} className="w-full">
+                <Link2 className="mr-2 h-4 w-4" /> Connect Strava
+              </Button>
+            </CardContent>
+          </Card>
+        </motion.div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen w-full bg-background">
+      <HrZonesModal open={showHrModal} values={hrZones} onChange={setHrZones} onSave={saveHrZones} saving={savingHrZones} />
+
       <div className="mx-auto max-w-6xl px-4 py-6">
-        <motion.div
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.35 }}
-          className="flex flex-col gap-2"
-        >
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }} className="flex flex-col gap-2">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight">
-                Weekly Training Dashboard
-              </h1>
+              <h1 className="text-2xl font-semibold tracking-tight">Weekly Training Dashboard</h1>
               <p className="text-sm text-muted-foreground">
                 HR zones (Z1–Z5), Aerobic vs Anaerobic, and total time by activity. Unzoned counts as Z1.
               </p>
@@ -741,23 +745,15 @@ export default function WeeklyTrainingDashboardApp() {
               <div className="flex items-center gap-2">
                 <div className="grid gap-1">
                   <Label className="text-xs">Week start (Mon)</Label>
-                  <Input
-                    type="date"
-                    value={weekStartISO}
-                    onChange={(e) => setWeekStartISO(e.target.value)}
-                    className="w-[170px]"
-                  />
+                  <Input type="date" value={weekStartISO} onChange={(e) => setWeekStartISO(e.target.value)} className="w-[170px]" />
                 </div>
-                <Button variant="secondary" onClick={resetWeek} className="mt-5">
-                  This week
-                </Button>
+                <Button variant="secondary" onClick={resetWeek} className="mt-5">This week</Button>
               </div>
 
               <div className="flex gap-2">
                 <Button variant="outline" onClick={exportData} className="mt-5">
                   <Download className="mr-2 h-4 w-4" /> Export
                 </Button>
-
                 <label className="mt-5">
                   <input
                     type="file"
@@ -781,29 +777,21 @@ export default function WeeklyTrainingDashboardApp() {
 
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-xs text-muted-foreground">
-              Week: <span className="font-medium">{weekStartISO}</span> →{" "}
-              <span className="font-medium">{weekEndISO}</span>
+              Athlete: <span className="font-medium">{athlete.athleteName || `Athlete #${athlete.athleteId}`}</span>
+              <span className="mx-2">•</span>
+              Week: <span className="font-medium">{weekStartISO}</span> → <span className="font-medium">{weekEndISO}</span>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              {strava.connected ? (
-                <>
-                  <div className="text-xs text-muted-foreground">
-                    Connected:{" "}
-                    <span className="font-medium">{strava.athleteName || "Strava"}</span>
-                  </div>
-                  <Button variant="secondary" onClick={syncFromStravaForWeek}>
-                    <RefreshCcw className="mr-2 h-4 w-4" /> Sync week
-                  </Button>
-                  <Button variant="outline" onClick={logoutStrava}>
-                    <LogOut className="mr-2 h-4 w-4" /> Disconnect
-                  </Button>
-                </>
-              ) : (
-                <Button onClick={connectStrava}>
-                  <Link2 className="mr-2 h-4 w-4" /> Connect Strava
-                </Button>
-              )}
+              <Button variant="secondary" onClick={syncFromStravaForWeek}>
+                <RefreshCcw className="mr-2 h-4 w-4" /> Sync week
+              </Button>
+              <Button variant="outline" onClick={() => setShowHrModal(true)}>
+                <Save className="mr-2 h-4 w-4" /> Edit HR zones
+              </Button>
+              <Button variant="outline" onClick={logoutStrava}>
+                <LogOut className="mr-2 h-4 w-4" /> Disconnect
+              </Button>
             </div>
           </div>
 
@@ -822,38 +810,26 @@ export default function WeeklyTrainingDashboardApp() {
             <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
 
-          {/* DASHBOARD */}
           <TabsContent value="dashboard">
-            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-4">
               <Card className="rounded-2xl shadow-sm">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm text-muted-foreground">Total training time</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-3xl font-semibold">{formatDuration(totals.totalMin)}</div>
-                </CardContent>
+                <CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">Total training time</CardTitle></CardHeader>
+                <CardContent><div className="text-3xl font-semibold">{formatDuration(totals.totalMin)}</div></CardContent>
               </Card>
-
               <Card className="rounded-2xl shadow-sm">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm text-muted-foreground">Aerobic time (Z1 + Z2)</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-3xl font-semibold">{formatDuration(totals.aerobicMin)}</div>
-                </CardContent>
+                <CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">Aerobic time (Z1 + Z2)</CardTitle></CardHeader>
+                <CardContent><div className="text-3xl font-semibold">{formatDuration(totals.aerobicMin)}</div></CardContent>
               </Card>
-
               <Card className="rounded-2xl shadow-sm">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm text-muted-foreground">Anaerobic time (Z4 + Z5)</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-3xl font-semibold">{formatDuration(totals.anaerobicMin)}</div>
-                </CardContent>
+                <CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">Zone 3 time</CardTitle></CardHeader>
+                <CardContent><div className="text-3xl font-semibold">{formatDuration(totals.z3Min)}</div></CardContent>
+              </Card>
+              <Card className="rounded-2xl shadow-sm">
+                <CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">Anaerobic time (Z4 + Z5)</CardTitle></CardHeader>
+                <CardContent><div className="text-3xl font-semibold">{formatDuration(totals.anaerobicMin)}</div></CardContent>
               </Card>
             </div>
 
-            {/* Zone cards */}
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
               {([
                 ["Z1", totals.z1Min],
@@ -866,92 +842,59 @@ export default function WeeklyTrainingDashboardApp() {
                   <CardHeader className="pb-2">
                     <CardTitle className="text-sm text-muted-foreground">
                       <span className="inline-flex items-center gap-2">
-                        <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: (ZONE_COLORS as any)[label] }} />
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: ZONE_COLORS[label] }} />
                         {label}
                       </span>
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
                     <div className="text-2xl font-semibold">{formatDuration(mins)}</div>
-                    {label === "Z1" && (
-                      <div className="mt-1 text-xs text-muted-foreground">Includes any unzoned time.</div>
-                    )}
+                    {label === "Z1" && <div className="mt-1 text-xs text-muted-foreground">Includes any unzoned time.</div>}
                   </CardContent>
                 </Card>
               ))}
             </div>
 
-            {/* Activity totals */}
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
-              {(ACTIVITY_TYPES as unknown as ActivityType[]).map((t) => (
+              {ACTIVITY_TYPES.map((t) => (
                 <Card key={t} className="rounded-2xl shadow-sm">
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm text-muted-foreground">{t}</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-semibold">{formatDuration(totals.activityMin[t])}</div>
-                  </CardContent>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">{t}</CardTitle></CardHeader>
+                  <CardContent><div className="text-2xl font-semibold">{formatDuration(totals.activityMin[t])}</div></CardContent>
                 </Card>
               ))}
             </div>
 
-            {/* Charts */}
             <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-5">
               <Card className="rounded-2xl shadow-sm lg:col-span-2">
-                <CardHeader>
-                  <CardTitle className="text-base">Zone distribution</CardTitle>
-                </CardHeader>
+                <CardHeader><CardTitle className="text-base">Zone distribution</CardTitle></CardHeader>
                 <CardContent>
                   {zoneChartData.length === 0 ? (
-                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                      Add sessions or sync Strava to see zone distribution.
-                    </div>
+                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Add sessions or sync Strava to see zone distribution.</div>
                   ) : (
                     <>
                       <div className="h-[240px]">
                         <ResponsiveContainer width="100%" height="100%">
                           <PieChart>
-                            <Pie
-                              data={zoneChartData}
-                              dataKey="value"
-                              nameKey="name"
-                              outerRadius={95}
-                              labelLine={false}
-                              label={renderPercentLabel}
-                            >
-                              {zoneChartData.map((entry) => (
-                                <Cell key={entry.name} fill={(ZONE_COLORS as any)[entry.name]} />
-                              ))}
+                            <Pie data={zoneChartData} dataKey="value" nameKey="name" outerRadius={95} labelLine={false} label={renderPercentLabel}>
+                              {zoneChartData.map((entry) => <Cell key={entry.name} fill={ZONE_COLORS[entry.name as keyof typeof ZONE_COLORS]} />)}
                             </Pie>
-                            <Tooltip
-                              formatter={(v: any, _n: any, p: any) => {
-                                const total = zoneChartData.reduce((a, b) => a + b.value, 0);
-                                const val = Number(v);
-                                const perc = pct(val, total).toFixed(0);
-                                return [`${formatDuration(val)} (${perc}%)`, p?.name];
-                              }}
-                            />
+                            <Tooltip formatter={(v: any, _n: any, p: any) => {
+                              const total = zoneChartData.reduce((a, b) => a + b.value, 0);
+                              const val = Number(v);
+                              const perc = pct(val, total).toFixed(0);
+                              return [`${formatDuration(val)} (${perc}%)`, p?.name];
+                            }} />
                           </PieChart>
                         </ResponsiveContainer>
                       </div>
-
-                      <LegendList
-                        items={zoneChartData.map((d) => ({
-                          name: d.name,
-                          color: (ZONE_COLORS as any)[d.name] || "#94A3B8",
-                          valueMin: d.value,
-                          totalMin: zoneTotalForPct,
-                        }))}
-                      />
+                      <LegendList items={zoneChartData.map((d) => ({ name: d.name, color: ZONE_COLORS[d.name as keyof typeof ZONE_COLORS], valueMin: d.value, totalMin: zoneTotalForPct }))} />
                     </>
                   )}
                 </CardContent>
               </Card>
 
               <Card className="rounded-2xl shadow-sm lg:col-span-3">
-                <CardHeader>
-                  <CardTitle className="text-base">Training time by day</CardTitle>
-                </CardHeader>
+                <CardHeader><CardTitle className="text-base">Training time by day</CardTitle></CardHeader>
                 <CardContent className="h-[280px]">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={byDay}>
@@ -968,65 +911,38 @@ export default function WeeklyTrainingDashboardApp() {
 
             <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-5">
               <Card className="rounded-2xl shadow-sm lg:col-span-2">
-                <CardHeader>
-                  <CardTitle className="text-base">Activity distribution</CardTitle>
-                </CardHeader>
+                <CardHeader><CardTitle className="text-base">Activity distribution</CardTitle></CardHeader>
                 <CardContent>
                   {activityChartData.length === 0 ? (
-                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                      Add sessions or sync Strava to see the activity breakdown.
-                    </div>
+                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Add sessions or sync Strava to see the activity breakdown.</div>
                   ) : (
                     <>
                       <div className="h-[240px]">
                         <ResponsiveContainer width="100%" height="100%">
                           <PieChart>
-                            <Pie
-                              data={activityChartData}
-                              dataKey="value"
-                              nameKey="name"
-                              outerRadius={95}
-                              labelLine={false}
-                              label={renderPercentLabel}
-                            >
-                              {activityChartData.map((entry) => (
-                                <Cell key={entry.name} fill={(ACTIVITY_COLORS as any)[entry.name]} />
-                              ))}
+                            <Pie data={activityChartData} dataKey="value" nameKey="name" outerRadius={95} labelLine={false} label={renderPercentLabel}>
+                              {activityChartData.map((entry) => <Cell key={entry.name} fill={ACTIVITY_COLORS[entry.name as ActivityType]} />)}
                             </Pie>
-                            <Tooltip
-                              formatter={(v: any, _n: any, p: any) => {
-                                const total = activityChartData.reduce((a, b) => a + b.value, 0);
-                                const val = Number(v);
-                                const perc = pct(val, total).toFixed(0);
-                                return [`${formatDuration(val)} (${perc}%)`, p?.name];
-                              }}
-                            />
+                            <Tooltip formatter={(v: any, _n: any, p: any) => {
+                              const total = activityChartData.reduce((a, b) => a + b.value, 0);
+                              const val = Number(v);
+                              const perc = pct(val, total).toFixed(0);
+                              return [`${formatDuration(val)} (${perc}%)`, p?.name];
+                            }} />
                           </PieChart>
                         </ResponsiveContainer>
                       </div>
-
-                      <LegendList
-                        items={activityChartData.map((d) => ({
-                          name: d.name,
-                          color: (ACTIVITY_COLORS as any)[d.name] || "#94A3B8",
-                          valueMin: d.value,
-                          totalMin: activityTotalForPct,
-                        }))}
-                      />
+                      <LegendList items={activityChartData.map((d) => ({ name: d.name, color: ACTIVITY_COLORS[d.name as ActivityType], valueMin: d.value, totalMin: activityTotalForPct }))} />
                     </>
                   )}
                 </CardContent>
               </Card>
 
               <Card className="rounded-2xl shadow-sm lg:col-span-3">
-                <CardHeader>
-                  <CardTitle className="text-base">Sessions this week</CardTitle>
-                </CardHeader>
+                <CardHeader><CardTitle className="text-base">Sessions this week</CardTitle></CardHeader>
                 <CardContent>
                   {weekSessions.length === 0 ? (
-                    <div className="py-10 text-center text-sm text-muted-foreground">
-                      No sessions yet. Add one or sync Strava.
-                    </div>
+                    <div className="py-10 text-center text-sm text-muted-foreground">No sessions yet. Add one or sync Strava.</div>
                   ) : (
                     <Table>
                       <TableHeader>
@@ -1043,53 +959,34 @@ export default function WeeklyTrainingDashboardApp() {
                           <TableHead className="w-[90px]"></TableHead>
                         </TableRow>
                       </TableHeader>
-
                       <TableBody>
                         {weekSessions.map((s) => {
                           const warning = warnZones(s);
                           const z1Adj = s.z1Min + getUnzonedMinutes(s);
-
                           return (
                             <TableRow key={s.id} className={warning ? "bg-muted/30" : ""}>
                               <TableCell className="font-medium">{s.date}</TableCell>
-
                               <TableCell>
                                 <div className="flex items-center gap-2">
                                   <span>{s.type}</span>
-                                  {s.source === "strava" && (
-                                    <span className="rounded-full border px-2 py-0.5 text-[10px] text-muted-foreground">
-                                      Strava
-                                    </span>
-                                  )}
+                                  {s.source === "strava" && <span className="rounded-full border px-2 py-0.5 text-[10px] text-muted-foreground">Strava</span>}
                                 </div>
                               </TableCell>
-
                               <TableCell className="text-right">{formatDuration(s.durationMin)}</TableCell>
                               <TableCell className="text-right">{formatDuration(z1Adj)}</TableCell>
                               <TableCell className="text-right">{formatDuration(s.z2Min)}</TableCell>
                               <TableCell className="text-right">{formatDuration(s.z3Min)}</TableCell>
                               <TableCell className="text-right">{formatDuration(s.z4Min)}</TableCell>
                               <TableCell className="text-right">{formatDuration(s.z5Min)}</TableCell>
-
                               <TableCell>
                                 <div className="flex flex-col">
                                   <span className="text-sm">{s.notes || "—"}</span>
-                                  {warning && (
-                                    <span className="text-xs text-muted-foreground">⚠ {warning}</span>
-                                  )}
+                                  {warning && <span className="text-xs text-muted-foreground">⚠ {warning}</span>}
                                 </div>
                               </TableCell>
-
                               <TableCell className="text-right">
                                 {s.source === "manual" ? (
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    onClick={() => removeSession(s.id)}
-                                    aria-label="Delete"
-                                  >
-                                    <Trash2 className="h-4 w-4" />
-                                  </Button>
+                                  <Button variant="ghost" size="icon" onClick={() => removeSession(s.id)} aria-label="Delete"><Trash2 className="h-4 w-4" /></Button>
                                 ) : (
                                   <div className="text-xs text-muted-foreground">—</div>
                                 )}
@@ -1105,60 +1002,32 @@ export default function WeeklyTrainingDashboardApp() {
             </div>
           </TabsContent>
 
-          {/* ADD SESSION */}
           <TabsContent value="add">
             <div className="mt-4 grid grid-cols-1 gap-4">
               <Card className="rounded-2xl shadow-sm">
-                <CardHeader>
-                  <CardTitle className="text-base">Add a training session (manual)</CardTitle>
-                </CardHeader>
-
+                <CardHeader><CardTitle className="text-base">Add a training session (manual)</CardTitle></CardHeader>
                 <CardContent>
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                     <div className="grid gap-1">
                       <Label>Date</Label>
-                      <Input
-                        type="date"
-                        value={String(form.date ?? weekStartISO)}
-                        onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))}
-                      />
+                      <Input type="date" value={String(form.date ?? weekStartISO)} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} />
                     </div>
-
                     <div className="grid gap-1">
                       <Label>Activity</Label>
-                      <Select
-                        value={String(form.type ?? "Run")}
-                        onValueChange={(v) => setForm((f) => ({ ...f, type: v as ActivityType }))}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select type" />
-                        </SelectTrigger>
+                      <Select value={String(form.type ?? "Run")} onValueChange={(v) => setForm((f) => ({ ...f, type: v as ActivityType }))}>
+                        <SelectTrigger><SelectValue placeholder="Select type" /></SelectTrigger>
                         <SelectContent>
-                          {(ACTIVITY_TYPES as unknown as ActivityType[]).map((t) => (
-                            <SelectItem key={t} value={t}>
-                              {t}
-                            </SelectItem>
-                          ))}
+                          {ACTIVITY_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
                         </SelectContent>
                       </Select>
                     </div>
-
                     <div className="grid gap-1">
                       <Label>Duration (minutes)</Label>
-                      <Input
-                        inputMode="numeric"
-                        value={String(form.durationMin ?? 0)}
-                        onChange={(e) => setForm((f) => ({ ...f, durationMin: parseNum(e.target.value) }))}
-                      />
+                      <Input inputMode="numeric" value={String(form.durationMin ?? 0)} onChange={(e) => setForm((f) => ({ ...f, durationMin: parseNum(e.target.value) }))} />
                     </div>
-
                     <div className="grid gap-1">
                       <Label>Notes (optional)</Label>
-                      <Input
-                        value={String(form.notes ?? "")}
-                        onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
-                        placeholder="Tempo run, intervals, weights…"
-                      />
+                      <Input value={String(form.notes ?? "")} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} placeholder="Tempo run, intervals, weights…" />
                     </div>
                   </div>
 
@@ -1175,46 +1044,30 @@ export default function WeeklyTrainingDashboardApp() {
                       <div key={key} className="grid gap-1">
                         <Label>
                           <span className="inline-flex items-center gap-2">
-                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: (ZONE_COLORS as any)[label] }} />
+                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: ZONE_COLORS[label] }} />
                             {label} (min)
                           </span>
                         </Label>
-                        <Input
-                          inputMode="numeric"
-                          value={String((form as any)[key] ?? 0)}
-                          onChange={(e) => setForm((f) => ({ ...f, [key]: parseNum(e.target.value) }))}
-                        />
+                        <Input inputMode="numeric" value={String((form as any)[key] ?? 0)} onChange={(e) => setForm((f) => ({ ...f, [key]: parseNum(e.target.value) }))} />
                       </div>
                     ))}
                   </div>
 
                   <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                    <div className="text-xs text-muted-foreground">
-                      Any time not assigned to zones will automatically count as{" "}
-                      <span className="font-medium">Zone 1</span>.
-                    </div>
-                    <Button onClick={addSession}>
-                      <Plus className="mr-2 h-4 w-4" /> Add session
-                    </Button>
+                    <div className="text-xs text-muted-foreground">Any time not assigned to zones will automatically count as <span className="font-medium">Zone 1</span>.</div>
+                    <Button onClick={addSession}><Plus className="mr-2 h-4 w-4" /> Add session</Button>
                   </div>
                 </CardContent>
               </Card>
             </div>
           </TabsContent>
 
-          {/* SETTINGS */}
           <TabsContent value="settings">
             <div className="mt-4 grid grid-cols-1 gap-4">
               <Card className="rounded-2xl shadow-sm">
-                <CardHeader>
-                  <CardTitle className="text-base">HR zone thresholds (for Strava HR streams)</CardTitle>
-                </CardHeader>
-
+                <CardHeader><CardTitle className="text-base">Heart-rate zones</CardTitle></CardHeader>
                 <CardContent>
-                  <p className="text-sm text-muted-foreground">
-                    Set the <span className="font-medium">lower bound</span> BPM for each zone.
-                  </p>
-
+                  <p className="text-sm text-muted-foreground">These values are saved to your athlete profile and reused every time you log in.</p>
                   <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     {([
                       ["Z2 low", "z2Low"],
@@ -1224,45 +1077,12 @@ export default function WeeklyTrainingDashboardApp() {
                     ] as const).map(([label, key]) => (
                       <div key={key} className="grid gap-1">
                         <Label>{label} (BPM)</Label>
-                        <Input
-                          inputMode="numeric"
-                          value={String((hrZones as any)[key] ?? 0)}
-                          onChange={(e) => setHrZones((z) => ({ ...z, [key]: parseNum(e.target.value) }))}
-                        />
+                        <Input inputMode="numeric" value={String(hrZones[key])} onChange={(e) => setHrZones((z) => ({ ...z, [key]: parseNum(e.target.value) }))} />
                       </div>
                     ))}
                   </div>
-
-                  <div className="mt-4 text-xs text-muted-foreground">
-                    If synced sessions show 0 zone time, either the activity lacks HR streams or your Strava scope doesn’t include it.
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card className="rounded-2xl shadow-sm">
-                <CardHeader>
-                  <CardTitle className="text-base">Strava sync</CardTitle>
-                </CardHeader>
-
-                <CardContent>
-                  {strava.connected ? (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Button variant="secondary" onClick={syncFromStravaForWeek}>
-                        <RefreshCcw className="mr-2 h-4 w-4" /> Sync selected week
-                      </Button>
-                      <Button variant="outline" onClick={logoutStrava}>
-                        <LogOut className="mr-2 h-4 w-4" /> Disconnect
-                      </Button>
-                    </div>
-                  ) : (
-                    <Button onClick={connectStrava}>
-                      <Link2 className="mr-2 h-4 w-4" /> Connect Strava
-                    </Button>
-                  )}
-
-                  <div className="mt-3 text-xs text-muted-foreground">
-                    Backend endpoints must exist under{" "}
-                    <span className="font-medium">/api/strava</span>.
+                  <div className="mt-4 flex justify-end">
+                    <Button onClick={saveHrZones} disabled={savingHrZones}><Save className="mr-2 h-4 w-4" /> {savingHrZones ? "Saving..." : "Save HR zones"}</Button>
                   </div>
                 </CardContent>
               </Card>
