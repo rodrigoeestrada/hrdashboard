@@ -145,6 +145,12 @@ function startOfWeekISO(d = new Date()) {
   return date.toISOString().slice(0, 10);
 }
 
+function normalizeToWeekMondayISO(inputISO: string) {
+  const [y, m, d] = inputISO.split("-").map(Number);
+  const date = new Date(Date.UTC(y, (m || 1) - 1, d || 1));
+  return startOfWeekISO(date);
+}
+
 function addDaysISO(iso: string, days: number) {
   const [y, m, d] = iso.split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
@@ -362,6 +368,26 @@ function LegendList({
     </div>
   );
 }
+
+function isCacheStale(lastSyncedAt: string | null, maxMinutes = 15) {
+  if (!lastSyncedAt) return true;
+  const diffMs = Date.now() - new Date(lastSyncedAt).getTime();
+  return diffMs > maxMinutes * 60 * 1000;
+}
+
+async function getWeeklyCache(weekStartISO: string) {
+  return apiGet<{ cached: boolean; sessions: Session[]; lastSyncedAt: string | null }>(
+    `/api/weekly-cache?weekStart=${weekStartISO}`
+  );
+}
+
+async function saveWeeklyCache(weekStartISO: string, sessions: Session[]) {
+  return apiPost(`/api/weekly-cache`, {
+    weekStart: weekStartISO,
+    sessions,
+  });
+}
+
 
 async function apiGet<T>(url: string): Promise<T> {
   const res = await fetch(url, { credentials: "include" });
@@ -604,6 +630,108 @@ export default function WeeklyTrainingDashboardApp() {
     }
   }
 
+const syncFromStravaForWeek = React.useCallback(
+  async (showProgress: boolean = true) => {
+    setSyncError("");
+    if (showProgress) setSyncStatus("Syncing activities from Strava…");
+
+    try {
+      const after = isoToUnixSeconds(weekStartISO + "T00:00:00Z");
+      const before = isoToUnixSeconds(addDaysISO(weekStartISO, 7) + "T00:00:00Z");
+
+      const activities = await apiGet<StravaActivity[]>(
+        `/api/strava/activities?after=${after}&before=${before}`
+      );
+
+      const baseSessions: Session[] = activities.map((a) => {
+        const dateISO = new Date(a.start_date).toISOString().slice(0, 10);
+        const durationMin = Math.round((a.moving_time ?? a.elapsed_time ?? 0) / 60);
+
+        return normalizeSession({
+          id: `strava-${a.id}`,
+          externalId: String(a.id),
+          source: "strava",
+          date: dateISO,
+          type: mapStravaToActivityType(a.type, a.sport_type),
+          durationMin,
+          notes: a.name || "",
+        });
+      });
+
+      const withHr = activities.filter(
+        (a) =>
+          typeof a.average_heartrate === "number" ||
+          typeof a.max_heartrate === "number"
+      );
+
+      const streamFetchCount = Math.min(withHr.length, 25);
+      const zoneByActivityId = new Map<
+        number,
+        { z1Min: number; z2Min: number; z3Min: number; z4Min: number; z5Min: number }
+      >();
+
+      for (let i = 0; i < streamFetchCount; i++) {
+        const a = withHr[i];
+
+        if (showProgress) {
+          setSyncStatus(`Syncing zones (${i + 1}/${streamFetchCount})…`);
+        }
+
+        try {
+          const streams = await apiGet<StravaStreamsResponse>(
+            `/api/strava/streams?activityId=${a.id}`
+          );
+          const z = computeZoneMinutesFromStreams(streams, hrZones);
+
+          if (z.hasStreams) {
+            zoneByActivityId.set(a.id, {
+              z1Min: z.z1Min,
+              z2Min: z.z2Min,
+              z3Min: z.z3Min,
+              z4Min: z.z4Min,
+              z5Min: z.z5Min,
+            });
+          }
+        } catch {
+          // ignore per-activity failures
+        }
+      }
+
+      const mergedSessions = baseSessions.map((s) => {
+        const idNum = Number(s.externalId || 0);
+        const z = zoneByActivityId.get(idNum);
+        return z ? normalizeSession({ ...s, ...z }) : s;
+      });
+
+      let nextSessionsForWeek: Session[] = [];
+
+      setSessions((prev) => {
+        const keepManual = prev.filter(
+          (p) => p.source !== "strava" || !withinWeek(p.date, weekStartISO)
+        );
+        const next = [...mergedSessions, ...keepManual];
+        nextSessionsForWeek = next.filter((s) => withinWeek(s.date, weekStartISO));
+        return next;
+      });
+
+      await saveWeeklyCache(weekStartISO, nextSessionsForWeek);
+
+      if (showProgress) {
+        setSyncStatus(
+          `Synced ${activities.length} activities. Zones computed for up to ${streamFetchCount}.`
+        );
+        setTimeout(() => setSyncStatus(""), 2500);
+      }
+    } catch (e: any) {
+      setSyncStatus("");
+      setSyncError(e?.message || "Failed to sync from Strava");
+    }
+  },
+  [weekStartISO, hrZones]
+);
+
+
+
   async function connectStrava() {
     setSyncError("");
     setSyncStatus("Creating Strava authorization link…");
@@ -630,71 +758,58 @@ export default function WeeklyTrainingDashboardApp() {
     }
   }
 
-  async function syncFromStravaForWeek() {
-    setSyncError("");
-    setSyncStatus("Syncing activities from Strava…");
+  useEffect(() => {
+  if (!athlete?.connected) return;
+  if (showHrModal) return;
 
+  let cancelled = false;
+
+  const loadWeek = async () => {
     try {
-      const after = isoToUnixSeconds(weekStartISO + "T00:00:00Z");
-      const before = isoToUnixSeconds(addDaysISO(weekStartISO, 7) + "T00:00:00Z");
-      const activities = await apiGet<StravaActivity[]>(`/api/strava/activities?after=${after}&before=${before}`);
+      const cache = await getWeeklyCache(weekStartISO);
 
-      const baseSessions: Session[] = activities.map((a) => {
-        const dateISO = new Date(a.start_date).toISOString().slice(0, 10);
-        const durationMin = Math.round((a.moving_time ?? a.elapsed_time ?? 0) / 60);
-        return normalizeSession({
-          id: `strava-${a.id}`,
-          externalId: String(a.id),
-          source: "strava",
-          date: dateISO,
-          type: mapStravaToActivityType(a.type, a.sport_type),
-          durationMin,
-          notes: a.name || "",
+      if (!cancelled && cache.cached) {
+        setSessions((prev) => {
+          const keepOtherWeeks = prev.filter(
+            (s) => !withinWeek(s.date, weekStartISO)
+          );
+
+          const cachedWeek = Array.isArray(cache.sessions)
+            ? cache.sessions.map(normalizeSession)
+            : [];
+
+          return [...cachedWeek, ...keepOtherWeeks];
         });
-      });
 
-      const withHr = activities.filter((a) => typeof a.average_heartrate === "number" || typeof a.max_heartrate === "number");
-      const streamFetchCount = Math.min(withHr.length, 25);
-      const zoneByActivityId = new Map<number, { z1Min: number; z2Min: number; z3Min: number; z4Min: number; z5Min: number }>();
-
-      for (let i = 0; i < streamFetchCount; i++) {
-        const a = withHr[i];
-        setSyncStatus(`Syncing zones (${i + 1}/${streamFetchCount})…`);
-        try {
-          const streams = await apiGet<StravaStreamsResponse>(`/api/strava/streams?activityId=${a.id}`);
-          const z = computeZoneMinutesFromStreams(streams, hrZones);
-          if (z.hasStreams) {
-            zoneByActivityId.set(a.id, {
-              z1Min: z.z1Min,
-              z2Min: z.z2Min,
-              z3Min: z.z3Min,
-              z4Min: z.z4Min,
-              z5Min: z.z5Min,
-            });
-          }
-        } catch {
-          // ignore per-activity failures
+        // 👇 if cache is fresh, STOP (no API call)
+        if (!isCacheStale(cache.lastSyncedAt, 15)) {
+          return;
         }
       }
 
-      const mergedSessions = baseSessions.map((s) => {
-        const idNum = Number(s.externalId || 0);
-        const z = zoneByActivityId.get(idNum);
-        return z ? normalizeSession({ ...s, ...z }) : s;
-      });
-
-      setSessions((prev) => {
-        const keepManual = prev.filter((p) => p.source !== "strava" || !withinWeek(p.date, weekStartISO));
-        return [...mergedSessions, ...keepManual];
-      });
-
-      setSyncStatus(`Synced ${activities.length} activities. Zones computed for up to ${streamFetchCount}.`);
-      setTimeout(() => setSyncStatus(""), 2500);
-    } catch (e: any) {
-      setSyncStatus("");
-      setSyncError(e?.message || "Failed to sync from Strava");
+      // 👇 otherwise fetch fresh data
+      if (!cancelled) {
+        void syncFromStravaForWeek(false);
+      }
+    } catch {
+      if (!cancelled) {
+        void syncFromStravaForWeek(false);
+      }
     }
-  }
+  };
+
+  void loadWeek();
+
+  return () => {
+    cancelled = true;
+  };
+}, [
+  athlete?.connected,
+  athlete?.athleteId,
+  weekStartISO,
+  showHrModal,
+  syncFromStravaForWeek,
+]);
 
   if (authLoading) {
     return (
@@ -744,10 +859,10 @@ export default function WeeklyTrainingDashboardApp() {
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <div className="flex items-center gap-2">
                 <div className="grid gap-1">
-                  <Label className="text-xs">Week start (Mon)</Label>
-                  <Input type="date" value={weekStartISO} onChange={(e) => setWeekStartISO(e.target.value)} className="w-[170px]" />
+                  <Label className="text-xs">Pick any date in the week</Label>
+                  <Input type="date" value={weekStartISO} onChange={(e) => setWeekStartISO(normalizeToWeekMondayISO(e.target.value))} className="w-[170px]" />
                 </div>
-                <Button variant="secondary" onClick={resetWeek} className="mt-5">This week</Button>
+                <Button variant="secondary" onClick={resetWeek} className="mt-5">This week (Mon–Sun)</Button>
               </div>
 
               <div className="flex gap-2">
@@ -779,7 +894,7 @@ export default function WeeklyTrainingDashboardApp() {
             <div className="text-xs text-muted-foreground">
               Athlete: <span className="font-medium">{athlete.athleteName || `Athlete #${athlete.athleteId}`}</span>
               <span className="mx-2">•</span>
-              Week: <span className="font-medium">{weekStartISO}</span> → <span className="font-medium">{weekEndISO}</span>
+              Week (Mon–Sun): <span className="font-medium">{weekStartISO}</span> → <span className="font-medium">{weekEndISO}</span>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
