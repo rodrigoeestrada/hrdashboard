@@ -898,7 +898,7 @@ const syncFromStravaForWeek = React.useCallback(
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="secondary" onClick={syncFromStravaForWeek}>
+              <Button variant="secondary" onClick={() => void syncFromStravaForWeek(true)}>
                 <RefreshCcw className="mr-2 h-4 w-4" /> Sync week
               </Button>
               <Button variant="outline" onClick={() => setShowHrModal(true)}>
